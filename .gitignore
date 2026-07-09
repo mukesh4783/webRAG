@@ -1,0 +1,36 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# ChromaDB (auto-generated vector store)
+chroma_db/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Temp/test files
+test_page.html
+page_states.json
