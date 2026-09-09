@@ -5,7 +5,7 @@ import os
 st.set_page_config(page_title="WebRAG Q&A", page_icon="🌐", layout="wide")
 
 st.title("🌐 WebRAG: Grounded Q&A Bot")
-st.markdown("Ask questions grounded in the live content of web pages. Uses LangChain, Web Loaders, Chroma, and OpenAI/GitHub Models.")
+st.markdown("Ask questions grounded in the live content of web pages.")
 
 # Sidebar for URL input and indexing
 st.sidebar.header("Source URLs")
