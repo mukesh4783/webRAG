@@ -17,25 +17,18 @@ from langchain_core.prompts import ChatPromptTemplate
 STATE_FILE = "page_states.json"
 CHROMA_DIR = "./chroma_db"
 
-def get_token():
-    # Reads token from .env file securely
-    token = os.environ.get("OPENAI_API_KEY", os.environ.get("GITHUB_TOKEN", ""))
-    if not token:
-        raise ValueError("Please set GITHUB_TOKEN in your .env file.")
-    return token
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 def get_llm():
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        api_key=get_token(),
-        base_url="https://models.inference.ai.azure.com",
+    return ChatOllama(
+        model="gemma4:31b-cloud",
+        base_url="http://127.0.0.1:11434",
     )
 
 def get_embeddings():
-    return OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        api_key=get_token(),
-        base_url="https://models.inference.ai.azure.com",
+    return OllamaEmbeddings(
+        model="nomic-embed-text",
+        base_url="http://127.0.0.1:11434",
     )
 
 def load_states():
