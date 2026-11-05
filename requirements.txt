@@ -1,8 +1,9 @@
-streamlit
-langchain
-langchain-openai
-langchain-community
-chromadb
-beautifulsoup4
-tiktoken
-python-dotenv
+# Mirrors pyproject.toml — `pip install -e .[dev]` is the preferred install.
+# Models run in Ollama (https://ollama.com): `ollama pull nomic-embed-text` and `ollama pull gemma4:31b-cloud`
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
+numpy>=1.26
+fastapi>=0.110
+uvicorn>=0.29
+pytest>=8
