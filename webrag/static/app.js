@@ -1,18 +1,28 @@
 "use strict";
 
-const $ = (sel) => document.querySelector(sel);
-const chatHistory = []; // chat turns sent back for follow-up questions
+/* WebRAG front-end: vanilla JS, no build step. */
 
-// ---------------------------------------------------------------- helpers
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const NOT_FOUND = "I couldn't find that in the indexed pages.";
+const GLOWS = ["var(--g-blue)", "var(--g-green)", "var(--g-orange)", "var(--g-pink)", "var(--g-purple)"];
+const chatHistory = [];
+let sources = [];
+let status = {};
+
+// ------------------------------------------------------------------ utilities
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const host = (url) => { try { return new URL(url).host.replace(/^www\./, ""); } catch { return url; } };
+const where = (url) => { try { const u = new URL(url); return u.host.replace(/^www\./, "") + u.pathname; } catch { return url; } };
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function ago(ts) {
+function ago(ts, short = false) {
   if (!ts) return "never";
   const s = Date.now() / 1000 - ts;
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}${short ? "m" : " min"} ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}${short ? "h" : " h"} ago`;
+  return `${Math.round(s / 86400)}${short ? "d" : " d"} ago`;
 }
 
 async function api(path, opts = {}) {
@@ -26,156 +36,263 @@ async function api(path, opts = {}) {
 }
 
 async function busy(btn, label, fn) {
-  const old = btn.textContent;
+  const old = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = label;
   try { return await fn(); }
-  catch (e) { alert(e.message); }
-  finally { btn.disabled = false; btn.textContent = old; }
+  catch (e) { toast(e.message, null, true); }
+  finally { btn.disabled = false; btn.innerHTML = old; }
 }
 
-// Minimal, XSS-safe markdown: escape first, then apply a few inline/block rules.
+function toast(message, action = null, error = false) {
+  const el = document.createElement("div");
+  el.className = `toast${error ? " error" : ""}`;
+  el.innerHTML = `<span class="dot"></span><span>${esc(message)}</span>${action ? `<a href="${action.href}">${esc(action.label)}</a>` : ""}`;
+  $("#toasts").appendChild(el);
+  el.querySelector("a")?.addEventListener("click", () => el.remove());
+  setTimeout(() => el.remove(), 7000);
+}
+
+// XSS-safe mini markdown; [n] citations become clickable chips.
 function md(src) {
   const inline = (t) => esc(t)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
     .replace(/_\(([^)]+)\)_/g, "<em>($1)</em>")
-    .replace(/\[(\d+)\]/g, '<span class="cite" data-n="$1">$1</span>');
+    .replace(/\[(\d+)\]/g, '<span class="cite" data-n="$1" role="button" tabindex="0">$1</span>');
   const out = [];
   let list = null;
   for (const line of src.split("\n")) {
     const m = line.match(/^\s*(?:[-*•]|(\d+)\.)\s+(.*)$/);
     if (m) {
       const tag = m[1] ? "ol" : "ul";
-      if (!list || list.tag !== tag) { if (list) out.push(`</${list.tag}>`); list = { tag }; out.push(`<${tag}>`); }
+      if (list !== tag) { if (list) out.push(`</${list}>`); list = tag; out.push(`<${tag}>`); }
       out.push(`<li>${inline(m[2])}</li>`);
       continue;
     }
-    if (list) { out.push(`</${list.tag}>`); list = null; }
+    if (list) { out.push(`</${list}>`); list = null; }
     const h = line.match(/^#{1,4}\s+(.*)$/);
     if (h) out.push(`<p><strong>${inline(h[1])}</strong></p>`);
     else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
   }
-  if (list) out.push(`</${list.tag}>`);
+  if (list) out.push(`</${list}>`);
   return out.join("");
 }
 
-// Word-level diff between two lines (LCS), used to highlight what exactly changed.
-function wordDiff(a, b) {
+// ------------------------------------------------------------------ diff → Before / After rows
+function wordOps(a, b) {
   const A = a.split(/(\s+)/), B = b.split(/(\s+)/);
-  if (A.length * B.length > 160000) return [esc(a), esc(b)];
+  if (A.length * B.length > 200000) return [["del", a], ["ins", b]];
   const dp = Array.from({ length: A.length + 1 }, () => new Uint16Array(B.length + 1));
   for (let i = A.length - 1; i >= 0; i--)
     for (let j = B.length - 1; j >= 0; j--)
       dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  let i = 0, j = 0, oa = "", ob = "";
+  const ops = [];
+  const push = (t, s) => (ops.length && ops.at(-1)[0] === t ? (ops.at(-1)[1] += s) : ops.push([t, s]));
+  let i = 0, j = 0;
   while (i < A.length && j < B.length) {
-    if (A[i] === B[j]) { oa += esc(A[i]); ob += esc(B[j]); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) oa += `<del>${esc(A[i++])}</del>`;
-    else ob += `<ins>${esc(B[j++])}</ins>`;
+    if (A[i] === B[j]) { push("eq", A[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) push("del", A[i++]);
+    else push("ins", B[j++]);
   }
-  while (i < A.length) oa += `<del>${esc(A[i++])}</del>`;
-  while (j < B.length) ob += `<ins>${esc(B[j++])}</ins>`;
-  return [oa, ob];
+  while (i < A.length) push("del", A[i++]);
+  while (j < B.length) push("ins", B[j++]);
+  return ops;
 }
 
-function renderDiff(lines) {
+function changePairs(lines) {
   const body = lines.filter((l) => !l.startsWith("---") && !l.startsWith("+++"));
-  const html = [];
+  const pairs = [];
   for (let k = 0; k < body.length; k++) {
-    const l = body[k];
-    // Pair runs of removed lines with the following added lines for word-level highlights.
-    if (l.startsWith("-")) {
-      const dels = [], adds = [];
-      while (k < body.length && body[k].startsWith("-")) dels.push(body[k++].slice(1));
-      while (k < body.length && body[k].startsWith("+")) adds.push(body[k++].slice(1));
-      k--;
-      const n = Math.max(dels.length, adds.length);
-      const dOut = [], aOut = [];
-      for (let p = 0; p < n; p++) {
-        if (p < dels.length && p < adds.length) {
-          const [x, y] = wordDiff(dels[p], adds[p]);
-          dOut.push(x); aOut.push(y);
-        } else if (p < dels.length) dOut.push(esc(dels[p]));
-        else aOut.push(esc(adds[p]));
-      }
-      dOut.forEach((x) => html.push(`<div class="d">− ${x}</div>`));
-      aOut.forEach((x) => html.push(`<div class="a">+ ${x}</div>`));
-    } else if (l.startsWith("+")) html.push(`<div class="a">+ ${esc(l.slice(1))}</div>`);
-    else if (l.startsWith("@@")) html.push(`<div class="h">⋯</div>`);
-    else html.push(`<div>  ${esc(l.slice(1))}</div>`);
+    if (!body[k].startsWith("-") && !body[k].startsWith("+")) continue;
+    const dels = [], adds = [];
+    while (k < body.length && body[k].startsWith("-")) dels.push(body[k++].slice(1).replace(/^##\s+/, ""));
+    while (k < body.length && body[k].startsWith("+")) adds.push(body[k++].slice(1).replace(/^##\s+/, ""));
+    k--;
+    for (let p = 0; p < Math.max(dels.length, adds.length); p++) pairs.push([dels[p], adds[p]]);
   }
-  return `<div class="diff">${html.join("")}</div>`;
+  return pairs;
 }
 
-// ---------------------------------------------------------------- sources
+function beforeAfter(lines, max = 4) {
+  const pairs = changePairs(lines);
+  const rows = pairs.slice(0, max).map(([d, a]) => {
+    let before = "", after = "";
+    if (d !== undefined && a !== undefined) {
+      for (const [t, s] of wordOps(d, a)) {
+        if (t === "eq") { before += esc(s); after += esc(s); }
+        else if (t === "del") before += `<del>${esc(s)}</del>`;
+        else after += `<ins>${esc(s)}</ins>`;
+      }
+    } else if (d !== undefined) before = `<del>${esc(d)}</del>`;
+    else after = `<ins>${esc(a)}</ins>`;
+    return `<div class="ba"><span class="k">Before</span><span class="v">${before || '<span class="k">(nothing)</span>'}</span>
+            <span class="k after">After</span><span class="v">${after || '<span class="k">(removed)</span>'}</span></div>`;
+  });
+  if (pairs.length > max) rows.push(`<div class="ba-more">+ ${plural(pairs.length - max, "more edit")}</div>`);
+  return rows.join("");
+}
+
+// ------------------------------------------------------------------ routing
+function show(view) {
+  if (!["ask", "sources", "changes"].includes(view)) view = "ask";
+  $$(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
+  $$(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+  if (view === "changes") { loadChanges(); localStorage.setItem("webrag-seen", String(Date.now() / 1000)); $("#tab-changes").hidden = true; }
+  if (view === "ask") setTimeout(() => $("#question").focus(), 0);
+  window.scrollTo({ top: 0 });
+}
+window.addEventListener("hashchange", () => show(location.hash.slice(1)));
+
+// ------------------------------------------------------------------ data loading
 async function loadStatus() {
   try {
-    const s = await api("/api/status");
-    $("#status").innerHTML =
-      `Model: <b>${esc(s.llm || "none (retrieval only)")}</b><br>` +
-      `Retrieval: ${esc(s.retrieval)}` +
-      (s.watch_minutes ? `<br>Auto-check every ${s.watch_minutes} min` : "");
-  } catch {}
+    status = await api("/api/status");
+    const model = (status.llm || "no model").replace(/^ollama:/, "");
+    const emb = (status.embedder || "keywords only").replace(/^ollama:/, "");
+    $("#chip-model").textContent = model;
+    $("#chip-retrieval").textContent = status.embedder ? "hybrid search" : "keyword search";
+    $("#health").textContent = `${model} · ${emb}`;
+    $(".health").classList.remove("off");
+  } catch {
+    $("#health").textContent = "server unreachable";
+    $(".health").classList.add("off");
+  }
 }
 
-async function loadSources(flashIds = []) {
-  const rows = await api("/api/sources");
-  $("#source-count").textContent = rows.length;
-  $("#sources").innerHTML = rows.map((r) => {
-    const stale = r.checked_at && Date.now() / 1000 - r.checked_at > 86400;
-    const dot = r.status === "error" ? "error" : stale ? "stale" : "";
-    return `<li class="source ${r.status === "error" ? "error" : ""} ${flashIds.includes(r.id) ? "flash" : ""}">
-      <div class="title" title="${esc(r.title)}">${esc(r.title || r.url)}</div>
-      <a class="url" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>
-      <div class="meta">
-        <span class="dot ${dot}"></span>
-        <span title="Last checked">checked ${ago(r.checked_at)}</span>·
-        <span title="Last content change">changed ${ago(r.changed_at)}</span>·
-        <span>${r.n_chunks} chunks</span>
-        <span class="actions">
-          <button class="ghost" title="Check this page" data-act="refresh" data-id="${r.id}">↻</button>
-          <button class="ghost" title="Version history" data-act="history" data-id="${r.id}">🕘 ${r.n_versions}</button>
-          <button class="ghost" title="Remove" data-act="delete" data-id="${r.id}">✕</button>
-        </span>
+async function loadSources(flash = []) {
+  sources = await api("/api/sources");
+  $("#tab-sources").textContent = sources.length;
+  $("#sources-count").textContent = plural(sources.length, "source");
+  renderSources(flash);
+  renderStats();
+  renderSuggestions();
+  updateChangeBadge();
+}
+
+function updateChangeBadge() {
+  const seen = Number(localStorage.getItem("webrag-seen") || 0);
+  const fresh = sources.filter((s) => s.n_versions > 1 && s.changed_at > seen).length;
+  const badge = $("#tab-changes");
+  badge.textContent = fresh;
+  badge.hidden = !fresh || location.hash === "#changes";
+}
+
+// ------------------------------------------------------------------ stats panel
+function renderStats() {
+  const ok = sources.filter((s) => s.status !== "error");
+  const passages = sources.reduce((n, s) => n + (s.n_chunks || 0), 0);
+  const revisions = sources.reduce((n, s) => n + Math.max(0, (s.n_versions || 1) - 1), 0);
+  const top = [...sources].sort((a, b) => b.n_chunks - a.n_chunks).slice(0, 3);
+  const maxChunks = Math.max(1, ...top.map((s) => s.n_chunks));
+  const checks = sources.map((s) => s.checked_at).filter(Boolean);
+  const newest = checks.length ? Math.max(...checks) : 0;
+  const oldest = checks.length ? Math.min(...checks) : 0;
+  const span = Math.max(1, newest - oldest);
+  const lastAgo = newest ? ago(newest, true).replace(" ago", "") : "none";
+
+  const squares = sources.slice(0, 24).map((s) => `<i class="${s.status === "error" ? "err" : ""}" title="${esc(s.title || s.url)}"></i>`).join("")
+    || '<i class="empty"></i><i class="empty"></i><i class="empty"></i>';
+
+  $("#stats").innerHTML = `
+    <div class="stat">
+      <div class="stat-label"><i>◎</i>Sources indexed</div>
+      <div class="stat-num">${sources.length}</div>
+      <div class="stat-desc">${ok.length} healthy${sources.length - ok.length ? `, ${sources.length - ok.length} unreachable` : ""}</div>
+      <div class="stat-foot"><div class="squares">${squares}</div><div class="squares-note">one square per page</div></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label"><i>¶</i>Passages searchable</div>
+      <div class="stat-num">${passages.toLocaleString()}</div>
+      <div class="stat-desc">Section-aware chunks with keyword and vector search</div>
+      <div class="stat-foot"><div class="bars">${top.map((s, i) => `
+        <span title="${esc(s.title)}">${esc((s.title || host(s.url)).slice(0, 12))}</span>
+        <div class="track"><div class="fill ${i === 0 ? "blue" : ""}" style="width:${(s.n_chunks / maxChunks) * 100}%"></div></div>
+        <span style="text-align:right">${s.n_chunks}</span>`).join("") || '<span>—</span><div class="track"></div><span></span>'}</div></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label"><i>↻</i>Freshness</div>
+      <div class="stat-num">${esc(lastAgo === "just now" ? "now" : lastAgo)}${lastAgo !== "just now" && lastAgo !== "none" ? "<small>ago</small>" : ""}</div>
+      <div class="stat-desc">Since the most recent recheck</div>
+      <div class="stat-foot">
+        <div class="timeline">${checks.map((c) => `<b class="${c === newest ? "now" : ""}" style="left:${checks.length > 1 ? ((c - oldest) / span) * 100 : 100}%"></b>`).join("")}</div>
+        <div class="timeline-labels"><span>oldest check</span><span>latest</span></div>
       </div>
-      ${r.error ? `<div class="small err">${esc(r.error)}</div>` : ""}
-    </li>`;
+    </div>
+    <div class="stat">
+      <div class="stat-label"><i>Δ</i>Revisions detected</div>
+      <div class="stat-num">${revisions}</div>
+      <div class="stat-desc">Page edits caught, summarised and re-indexed</div>
+      <div class="stat-foot pills">
+        <span class="chip blue">${esc((status.llm || "no model").replace(/^ollama:/, ""))}</span>
+        <span class="chip">${esc((status.embedder || "keywords").replace(/^ollama:/, ""))}</span>
+      </div>
+    </div>`;
+}
+
+function renderSuggestions() {
+  const short = (t) => { t = t.split(/\s+[-–|]\s+/)[0]; return t.length > 36 ? t.slice(0, 34) + "…" : t; };
+  const titles = sources.filter((s) => s.n_chunks).map((s) => short(s.title || host(s.url))).slice(0, 2);
+  const ideas = titles.length
+    ? [`Summarise ${titles[0]}`, ...(titles[1] ? [`Compare ${titles[0]} and ${titles[1]}`] : []), "What changed recently?"]
+    : [];
+  $("#suggest").innerHTML = ideas.map((q) => `<button type="button">${esc(q)}</button>`).join("")
+    || `<button type="button" data-go="sources">Add your first source →</button>`;
+}
+$("#suggest").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.dataset.go) { location.hash = b.dataset.go; return; }
+  $("#question").value = b.textContent;
+  $("#ask-form").requestSubmit();
+});
+
+// ------------------------------------------------------------------ sources view
+const GLOBE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>`;
+
+function renderSources(flash = []) {
+  if (!sources.length) {
+    $("#sources").innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sources yet</h3>Paste a URL above. Wikipedia articles, docs and blog posts all work well.</div>`;
+    return;
+  }
+  $("#sources").innerHTML = sources.map((s, i) => {
+    const changed = s.n_versions > 1;
+    return `<article class="card ${flash.includes(s.id) ? "flash" : ""}" style="--glow:${s.status === "error" ? "var(--magenta)" : GLOWS[i % GLOWS.length]}">
+      <div class="badge">${GLOBE}</div>
+      <h3>${esc(s.title || host(s.url))}</h3>
+      <a class="url" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.url)}">${esc(where(s.url))}</a>
+      <div class="meta">
+        <span class="chip">${plural(s.n_chunks, "passage")}</span>
+        <span class="chip ${changed ? "blue" : ""}">${plural(s.n_versions, "version")}</span>
+        <span class="chip">checked ${ago(s.checked_at, true)}</span>
+      </div>
+      ${s.error ? `<div class="err">${esc(s.error)}</div>` : ""}
+      <div class="actions">
+        <button class="btn btn-outline btn-sm" data-act="recheck" data-id="${s.id}">Recheck</button>
+        <button class="btn btn-outline btn-sm" data-act="history" data-id="${s.id}">History</button>
+        <button class="btn btn-ghost btn-sm" data-act="remove" data-id="${s.id}">Remove</button>
+      </div>
+    </article>`;
   }).join("");
 }
 
-function showReport(events) {
-  const el = $("#report");
-  const counts = events.reduce((acc, e) => ((acc[e.status] = (acc[e.status] || 0) + 1), acc), {});
-  const summary = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(" · ");
-  el.innerHTML = `<header><h2>Freshness report <span class="muted small">${esc(summary)}</span></h2>
-      <button class="ghost" onclick="this.closest('section').hidden = true">✕</button></header>` +
-    events.map((e) => `<div class="event">
-      <span class="badge ${e.status}">${e.status}</span>
-      <b>${esc(e.title || e.url)}</b> <span class="muted small">${esc(e.url)}</span>
-      ${e.via_304 ? '<span class="muted small"> · server said 304 Not Modified</span>' : ""}
-      ${e.error ? `<div class="err small">${esc(e.error)}</div>` : ""}
-      ${e.status === "new" ? `<div class="muted small">Indexed ${e.chunks_added} chunks.</div>` : ""}
-      ${e.status === "changed" ? `
-        ${e.summary ? `<div class="summary">${esc(e.summary)}</div>` : ""}
-        <div class="muted small">+${e.added} / −${e.removed} lines · ${e.chunks_added} chunks re-indexed, ${e.chunks_removed} dropped (unchanged chunks reused)</div>
-        <details open><summary>View diff</summary>${renderDiff(e.diff)}</details>` : ""}
-    </div>`).join("");
-  el.hidden = false;
+function summarise(events) {
+  const c = (st) => events.filter((e) => e.status === st).length;
+  const parts = [];
+  if (c("new")) parts.push(`${c("new")} added`);
+  if (c("changed")) parts.push(`${c("changed")} changed`);
+  if (c("unchanged")) parts.push(`${c("unchanged")} unchanged`);
+  if (c("error")) parts.push(`${c("error")} failed`);
+  return parts.join(" · ") || "nothing to check";
 }
 
-async function showHistory(id) {
-  const data = await api(`/api/sources/${id}/history`);
-  $("#history-title").textContent = data.source.title || data.source.url;
-  $("#history-body").innerHTML = data.versions.map((v) => `
-    <div class="version">
-      <div><b>${new Date(v.fetched_at * 1000).toLocaleString()}</b>
-        <span class="muted small">${v.initial ? "first indexed" : `+${v.added} / −${v.removed} lines`}</span></div>
-      ${v.summary ? `<div class="summary">${esc(v.summary)}</div>` : ""}
-      ${v.diff.length ? `<details ${v === data.versions[0] ? "open" : ""}><summary>Diff vs previous</summary>${renderDiff(v.diff)}</details>` : ""}
-    </div>`).join("") || '<p class="muted">No versions yet.</p>';
-  $("#history").showModal();
+async function afterRefresh(events, title) {
+  await loadSources(events.filter((e) => e.status === "changed" || e.status === "new").map((e) => e.source_id));
+  const changed = events.some((e) => e.status === "changed");
+  const failed = events.filter((e) => e.status === "error");
+  toast(`${title}: ${summarise(events)}`, changed ? { href: "#changes", label: "View changes" } : null, failed.length > 0 && !changed);
+  failed.forEach((e) => toast(`${host(e.url)}: ${e.error}`, null, true));
 }
 
 $("#sources").addEventListener("click", async (ev) => {
@@ -183,72 +300,116 @@ $("#sources").addEventListener("click", async (ev) => {
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === "history") return showHistory(id);
-  if (btn.dataset.act === "delete") {
-    if (!confirm("Remove this page from the index?")) return;
+  if (btn.dataset.act === "remove") {
+    if (!confirm("Remove this source and its history?")) return;
     await api(`/api/sources/${id}`, { method: "DELETE" });
-    return refreshAll();
+    return loadSources();
   }
-  if (btn.dataset.act === "refresh") {
-    await busy(btn, "…", async () => {
-      const events = await api("/api/refresh", { method: "POST", body: JSON.stringify({ ids: [id] }) });
-      showReport(events);
-      await loadSources(events.filter((e) => e.status === "changed").map((e) => e.source_id));
-    });
-  }
+  await busy(btn, "Checking…", async () => {
+    const events = await api("/api/refresh", { method: "POST", body: JSON.stringify({ ids: [id] }) });
+    await afterRefresh(events, "Recheck");
+  });
 });
 
 $("#add-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const urls = $("#urls").value.split("\n").map((u) => u.trim()).filter(Boolean);
-  if (!urls.length) return;
-  await busy(ev.submitter, "Indexing…", async () => {
-    const events = await api("/api/sources", { method: "POST", body: JSON.stringify({ urls, depth: Number($("#depth").value) }) });
-    showReport(events);
+  const urls = $("#urls").value.split(/\s+/).map((u) => u.trim()).filter(Boolean);
+  if (!urls.length) return $("#urls").focus();
+  const depth = Number(new FormData(ev.target).get("depth"));
+  await busy(ev.submitter || $("button[type=submit]", ev.target), "Indexing…", async () => {
+    const events = await api("/api/sources", { method: "POST", body: JSON.stringify({ urls, depth }) });
     $("#urls").value = "";
-    await refreshAll();
+    await afterRefresh(events, "Indexing done");
+    await loadStatus();
   });
 });
 
-$("#refresh-all").addEventListener("click", (ev) =>
-  busy(ev.currentTarget, "Checking…", async () => {
+$("#recheck-all").addEventListener("click", (ev) =>
+  busy(ev.currentTarget, "Rechecking…", async () => {
     const events = await api("/api/refresh", { method: "POST", body: "{}" });
-    showReport(events);
-    await loadSources(events.filter((e) => e.status === "changed").map((e) => e.source_id));
+    await afterRefresh(events, "Recheck");
+    if (location.hash === "#changes") loadChanges();
   }));
 
-async function refreshAll() { await Promise.all([loadSources(), loadStatus()]); }
-
-// ---------------------------------------------------------------- chat
-function addMessage(cls, html) {
-  $("#empty").hidden = true;
-  const div = document.createElement("div");
-  div.className = `msg ${cls}`;
-  div.innerHTML = html;
-  $("#messages").appendChild(div);
-  div.scrollIntoView({ block: "end", behavior: "smooth" });
-  return div;
+// ------------------------------------------------------------------ change log
+function changeCard(v, src, compact = false) {
+  const d = new Date(v.fetched_at * 1000);
+  const side = `<div class="change-side">
+      <div class="when">${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}</div>
+      <div class="time">${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${ago(v.fetched_at, true)}</div>
+      ${compact ? "" : `<div class="src">${esc(src.title || host(src.url))}</div><div class="src-url">${esc(host(src.url))}</div>`}
+    </div>`;
+  if (v.initial) {
+    return `<div class="change added">${side}<div class="change-main">First indexed. This is the baseline future versions are compared against.</div></div>`;
+  }
+  return `<div class="change">${side}<div class="change-main">
+      <p class="summary ${v.summary ? "" : "muted"}">${esc(v.summary || "Text changed. No summary was generated (the model was unavailable).")}</p>
+      <div class="tags"><span class="chip blue">+${v.added} lines</span><span class="chip pink">−${v.removed} lines</span></div>
+      ${beforeAfter(v.diff)}
+    </div></div>`;
 }
 
-function renderCards(box, sources, answer) {
-  const used = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
-  if (!used.size && answer.includes("couldn't find that in the indexed pages")) sources = [];
-  box.querySelector(".cards").innerHTML = sources.map((s) => `
-    <div class="card ${used.size ? (used.has(s.n) ? "used" : "unused") : ""}" data-n="${s.n}">
-      <span class="n">[${s.n}]</span><span class="ct">${esc(s.title)}</span>
-      ${s.section ? `<span class="sec">§ ${esc(s.section)}</span>` : ""}
-      <span class="snip">${esc(s.text)}</span>
-      <div class="small muted" style="margin-top:4px">checked ${ago(s.checked_at)} · <a href="${esc(s.url)}" target="_blank" rel="noopener">open ↗</a></div>
-    </div>`).join("");
+async function loadChanges() {
+  const box = $("#changes");
+  if (!sources.length) {
+    box.innerHTML = `<div class="empty"><h3>No sources yet</h3>Add a page, edit it, then press “Recheck sources”. The edit will show up here.</div>`;
+    return;
+  }
+  const histories = await Promise.all(sources.map((s) => api(`/api/sources/${s.id}/history`).catch(() => null)));
+  const items = [];
+  histories.forEach((h) => h && h.versions.forEach((v) => items.push({ v, src: h.source })));
+  items.sort((a, b) => b.v.fetched_at - a.v.fetched_at);
+  const edits = items.filter((x) => !x.v.initial);
+  box.innerHTML = (edits.length ? "" : `<div class="empty"><h3>No edits detected yet</h3>Your pages haven't changed since they were indexed. Use “Recheck sources” any time.</div>`)
+    + items.map((x) => changeCard(x.v, x.src)).join("");
+}
+
+async function showHistory(id) {
+  const data = await api(`/api/sources/${id}/history`);
+  $("#history-title").textContent = data.source.title || host(data.source.url);
+  $("#history-url").textContent = data.source.url;
+  $("#history-url").href = data.source.url;
+  $("#history-body").innerHTML = data.versions.map((v) => changeCard(v, data.source, true)).join("");
+  $("#history").showModal();
+}
+$("#history").addEventListener("click", (ev) => {
+  if (ev.target.closest("[data-close]") || ev.target === ev.currentTarget) ev.currentTarget.close();
+});
+
+// ------------------------------------------------------------------ ask
+function renderRefs(card, refs, answer) {
+  const box = $(".refs", card);
+  const cited = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+  if ((!cited.size && answer.includes(NOT_FOUND)) || !refs.length) { box.remove(); return; }
+  const row = (r) => `<div class="ref" data-n="${r.n}">
+      <span class="num">${r.n}</span>
+      <div><div class="ref-title">${esc(r.title)}</div>${r.section ? `<div class="ref-sec">${esc(r.section.split(" > ").slice(-2).join(" › "))}</div>` : ""}</div>
+      <span class="ref-meta">checked ${ago(r.checked_at, true)} · <a href="${esc(r.url)}" target="_blank" rel="noopener">open ↗</a></span>
+      <blockquote>${esc(r.text)}</blockquote>
+    </div>`;
+  const used = cited.size ? refs.filter((r) => cited.has(r.n)) : refs;
+  const rest = cited.size ? refs.filter((r) => !cited.has(r.n)) : [];
+  box.innerHTML = `<div class="refs-head"><span class="label">References</span><span class="label">click to preview the passage</span></div>
+    ${used.map(row).join("")}
+    ${rest.length ? `<details class="more-refs"><summary>${plural(rest.length, "more passage")} retrieved but not cited</summary>${rest.map(row).join("")}</details>` : ""}`;
 }
 
 async function ask(question) {
-  addMessage("user", esc(question));
-  const box = addMessage("bot", `<div class="answer typing"></div><div class="cards"></div><div class="query-note"></div>`);
-  const answerEl = box.querySelector(".answer");
-  let text = "", sources = [];
-  const btn = $("#ask-btn");
-  btn.disabled = true;
+  document.body.classList.add("chatting");
+  const card = document.createElement("article");
+  card.className = "answer";
+  card.innerHTML = `
+    <div class="answer-head"><h3>${esc(question)}</h3><span class="chip">searching…</span></div>
+    <div class="answer-body typing"></div>
+    <div class="searched"></div>
+    <div class="refs"></div>`;
+  $("#thread").appendChild(card);
+  card.scrollIntoView({ behavior: "smooth", block: "start" });
 
+  const body = $(".answer-body", card);
+  const chip = $(".answer-head .chip", card);
+  let text = "", refs = [];
+  $("#ask-btn").disabled = true;
   try {
     const res = await fetch("/api/ask", {
       method: "POST",
@@ -265,43 +426,57 @@ async function ask(question) {
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
-        if (!chunk.startsWith("data: ")) continue;
-        const ev = JSON.parse(chunk.slice(6));
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!raw.startsWith("data: ")) continue;
+        const ev = JSON.parse(raw.slice(6));
         if (ev.type === "sources") {
-          sources = ev.sources;
-          if (ev.query && ev.query !== question) box.querySelector(".query-note").textContent = `Searched for: “${ev.query}”`;
+          refs = ev.sources;
+          chip.textContent = `reading ${plural(refs.length, "passage")}…`;
+          if (ev.query && ev.query.toLowerCase() !== question.toLowerCase()) $(".searched", card).textContent = `searched for: ${ev.query}`;
         } else if (ev.type === "token") {
           text += ev.text;
-          answerEl.innerHTML = md(text);
+          body.innerHTML = md(text);
         } else if (ev.type === "error") {
-          answerEl.innerHTML += `<p class="err">${esc(ev.message)}</p>`;
+          body.insertAdjacentHTML("beforeend", `<p class="err">${esc(ev.message)}</p>`);
         }
       }
-      box.scrollIntoView({ block: "end" });
     }
   } catch (e) {
-    answerEl.innerHTML += `<p class="err">${esc(e.message)}</p>`;
+    body.insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`);
   } finally {
-    answerEl.classList.remove("typing");
-    btn.disabled = false;
+    body.classList.remove("typing");
+    $("#ask-btn").disabled = false;
   }
-  renderCards(box, sources, text);
+
+  const nCited = new Set([...text.matchAll(/\[(\d+)\]/g)].map((m) => m[1])).size;
+  const refused = !nCited && text.includes(NOT_FOUND);
+  if (refused) {
+    body.innerHTML = `<div class="notfound"><b>Not in your sources.</b><span>None of the indexed pages answer this, so WebRAG won't guess. Try adding a page that covers it.</span></div><p></p>`;
+    chip.className = "chip pink"; chip.textContent = "not in sources";
+  } else if (nCited) {
+    chip.className = "chip green"; chip.textContent = `grounded in ${plural(nCited, "source")}`;
+  } else {
+    chip.className = "chip"; chip.textContent = "no citations";
+  }
+  renderRefs(card, refs, text);
   chatHistory.push({ role: "user", content: question }, { role: "assistant", content: text });
 }
 
-$("#messages").addEventListener("click", (ev) => {
+$("#thread").addEventListener("click", (ev) => {
   const cite = ev.target.closest(".cite");
-  const card = ev.target.closest(".card");
   if (cite) {
-    const target = cite.closest(".msg").querySelector(`.card[data-n="${cite.dataset.n}"]`);
-    if (!target) return;
-    target.classList.add("hl", "open");
-    target.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    setTimeout(() => target.classList.remove("hl"), 1600);
-  } else if (card && !ev.target.closest("a")) {
-    card.classList.toggle("open");
+    const ref = $(`.ref[data-n="${cite.dataset.n}"]`, cite.closest(".answer"));
+    if (!ref) return;
+    const more = ref.closest("details");
+    if (more) more.open = true;
+    ref.classList.add("open", "hl");
+    ref.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    setTimeout(() => ref.classList.remove("hl"), 1400);
+    return;
   }
+  const ref = ev.target.closest(".ref");
+  if (ref && !ev.target.closest("a")) ref.classList.toggle("open");
 });
 
 const q = $("#question");
@@ -313,8 +488,22 @@ $("#ask-form").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const question = q.value.trim();
   if (!question || $("#ask-btn").disabled) return;
-  q.value = ""; q.style.height = "auto";
+  q.value = "";
+  q.style.height = "auto";
   ask(question);
 });
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "/" && !["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) {
+    ev.preventDefault();
+    if (location.hash && location.hash !== "#ask") location.hash = "ask";
+    q.focus();
+  }
+});
 
-refreshAll();
+// ------------------------------------------------------------------ boot
+(async () => {
+  await loadStatus();
+  await loadSources().catch((e) => toast(e.message, null, true));
+  show(location.hash.slice(1) || "ask");
+  setInterval(renderStats, 30000);
+})();
