@@ -34,3 +34,10 @@ Thumbs.db
 # Temp/test files
 test_page.html
 page_states.json
+
+# WebRAG v2 local index (delete to reset)
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+*.egg-info/
