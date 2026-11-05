@@ -3,70 +3,140 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WebRAG — grounded answers from live pages</title>
+  <title>WebRAG: grounded answers from live web pages</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23045dda'/%3E%3Cpath d='M7 20a9 9 0 0 1 18 0' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='20' r='3' fill='white'/%3E%3C/svg%3E">
 </head>
 <body>
-  <aside id="sidebar">
-    <header class="brand">
-      <span class="logo">◎</span>
-      <div>
-        <h1>WebRAG</h1>
-        <p class="muted">Answers from pages you choose — and only those.</p>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="#ask" aria-label="WebRAG home">
+        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="var(--blue)"/>
+          <path d="M7 20a9 9 0 0 1 18 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="16" cy="20" r="3" fill="#fff"/>
+        </svg>
+        <span>webrag</span>
+      </a>
+      <nav class="tabs" role="tablist">
+        <a href="#ask" data-view="ask" role="tab">Ask</a>
+        <a href="#sources" data-view="sources" role="tab">Sources <span class="tab-count" id="tab-sources">0</span></a>
+        <a href="#changes" data-view="changes" role="tab">Changes <span class="tab-count blue" id="tab-changes" hidden>0</span></a>
+      </nav>
+      <div class="nav-right">
+        <button class="btn btn-ghost" id="recheck-all" type="button">Recheck sources</button>
+        <a class="btn btn-dark" href="#sources" data-view="sources">Add a source</a>
       </div>
-    </header>
-
-    <form id="add-form">
-      <label for="urls">Add pages</label>
-      <textarea id="urls" rows="3" placeholder="https://example.com/page&#10;one URL per line"></textarea>
-      <div class="row">
-        <select id="depth" title="Follow same-site links">
-          <option value="0">This page only</option>
-          <option value="1">+ linked pages (1 level)</option>
-          <option value="2">+ linked pages (2 levels)</option>
-        </select>
-        <button type="submit" class="primary">Index</button>
-      </div>
-    </form>
-
-    <div class="sources-head">
-      <h2>Sources <span id="source-count" class="pill">0</span></h2>
-      <button id="refresh-all" class="ghost" title="Re-check every page for changes">↻ Check for changes</button>
     </div>
-    <ul id="sources"></ul>
+  </header>
 
-    <footer id="status" class="muted small"></footer>
-  </aside>
-
-  <main>
-    <section id="report" hidden></section>
-
-    <section id="chat">
-      <div id="empty" class="empty">
-        <h2>Ask anything about your indexed pages</h2>
-        <p class="muted">Every claim is cited. If the pages don't say it, WebRAG won't either.</p>
-        <div class="tips">
-          <span>1. Add a URL on the left</span>
-          <span>2. Ask a question below</span>
-          <span>3. Edit the page, click “Check for changes”, ask again</span>
-        </div>
+  <!-- ================================================================ ASK -->
+  <main id="view-ask" class="view">
+    <section class="hero" id="hero">
+      <div class="hero-decor" aria-hidden="true">
+        <div class="gridlines"></div>
+        <div class="arcs"><i></i><i></i><i></i></div>
+        <div class="halftone"></div>
       </div>
-      <div id="messages"></div>
+      <div class="hero-content">
+        <span class="eyebrow">Grounded RAG · Live web pages</span>
+        <h1>Ask the web you trust. <br>Verify every answer.</h1>
+        <p class="lead">WebRAG answers only from the pages you index, cites every claim, and notices
+          the moment a page changes.</p>
+      </div>
     </section>
 
-    <form id="ask-form">
-      <textarea id="question" rows="1" placeholder="Ask a question…  (Enter to send, Shift+Enter for newline)"></textarea>
-      <button type="submit" class="primary" id="ask-btn">Ask</button>
-    </form>
+    <section class="thread-wrap">
+      <div id="thread" class="thread"></div>
+
+      <form id="ask-form" class="askbar">
+        <textarea id="question" rows="1" placeholder="Ask a question about your sources…" aria-label="Question"></textarea>
+        <div class="askbar-row">
+          <div class="askbar-meta">
+            <span class="chip" id="chip-retrieval">hybrid search</span>
+            <span class="chip" id="chip-model">model</span>
+            <span class="hint">Enter to ask · Shift+Enter for a new line · <kbd>/</kbd> to focus</span>
+          </div>
+          <button type="submit" class="btn btn-primary" id="ask-btn">Ask <span aria-hidden="true">→</span></button>
+        </div>
+      </form>
+
+      <div class="suggest" id="suggest"></div>
+    </section>
+
+    <section class="stats-wrap" id="stats-wrap">
+      <div class="section-head">
+        <h2>Your knowledge base, at a glance</h2>
+        <p>Live numbers from the pages WebRAG is watching.</p>
+      </div>
+      <div class="stats" id="stats"></div>
+    </section>
   </main>
+
+  <!-- ================================================================ SOURCES -->
+  <main id="view-sources" class="view" hidden>
+    <div class="page">
+      <div class="page-head">
+        <span class="eyebrow">Sources</span>
+        <h2>The pages your answers come from</h2>
+        <p>Add any public page. WebRAG keeps the readable text, splits it by section, and re-reads it to catch edits.</p>
+      </div>
+
+      <form id="add-form" class="panel add">
+        <label for="urls" class="label">Page URLs</label>
+        <textarea id="urls" rows="2" spellcheck="false" placeholder="https://en.wikipedia.org/wiki/Retrieval-augmented_generation&#10;one URL per line"></textarea>
+        <div class="add-row">
+          <div class="segmented" role="radiogroup" aria-label="Crawl depth">
+            <label><input type="radio" name="depth" value="0" checked><span>This page</span></label>
+            <label><input type="radio" name="depth" value="1"><span>+ linked pages</span></label>
+            <label><input type="radio" name="depth" value="2"><span>+ 2 levels</span></label>
+          </div>
+          <button type="submit" class="btn btn-primary">Add sources</button>
+        </div>
+      </form>
+
+      <div class="grid-head">
+        <span class="label" id="sources-count">0 sources</span>
+      </div>
+      <div class="cards" id="sources"></div>
+    </div>
+  </main>
+
+  <!-- ================================================================ CHANGES -->
+  <main id="view-changes" class="view" hidden>
+    <div class="page">
+      <div class="page-head">
+        <span class="eyebrow">Change log</span>
+        <h2>What changed on your pages</h2>
+        <p>Every recheck compares a page with the last saved version. Edits are recorded here with a plain-English summary.</p>
+      </div>
+      <div id="changes" class="changes"></div>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <div class="foot-inner">
+      <span>webrag · answers grounded in your sources</span>
+      <span class="health"><i></i><span id="health">checking models…</span></span>
+    </div>
+  </footer>
 
   <dialog id="history">
     <div class="dialog-head">
-      <h2 id="history-title">History</h2>
-      <button class="ghost" onclick="this.closest('dialog').close()">✕</button>
+      <div>
+        <span class="eyebrow">Version history</span>
+        <h3 id="history-title"></h3>
+        <a id="history-url" class="mono-link" target="_blank" rel="noopener"></a>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">✕</button>
     </div>
-    <div id="history-body"></div>
+    <div id="history-body" class="dialog-body"></div>
   </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>
