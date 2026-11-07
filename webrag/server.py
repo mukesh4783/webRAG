@@ -6,12 +6,14 @@ import asyncio
 import contextlib
 import json
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .documents import SUPPORTED, is_supported
 from .engine import Engine
 
 STATIC = Path(__file__).parent / "static"
@@ -83,6 +85,39 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(400, f"URLs must start with http:// or https:// — got {bad[0]!r}")
         events = await eng.add(urls, depth=req.depth)
         return [e.to_dict() for e in events]
+
+    @app.post("/api/documents")
+    async def upload(request: Request, filename: str, replace: int | None = None):
+        """Upload one document as the raw request body (no multipart needed):
+        POST /api/documents?filename=report.pdf[&replace=<source id>]"""
+        if not is_supported(filename):
+            raise HTTPException(400, f"Unsupported file type. Supported: {', '.join(sorted(SUPPORTED))}")
+        limit = int(eng.s.max_upload_mb * 1024 * 1024)
+        if int(request.headers.get("content-length") or 0) > limit:
+            raise HTTPException(413, f"File is larger than the {eng.s.max_upload_mb:g} MB limit.")
+        data = bytearray()
+        async for part in request.stream():
+            data += part
+            if len(data) > limit:
+                raise HTTPException(413, f"File is larger than the {eng.s.max_upload_mb:g} MB limit.")
+        if not data:
+            raise HTTPException(400, "The file is empty.")
+        if replace is not None:
+            row = eng.store.source(replace)
+            if not row or row["kind"] != "file":
+                raise HTTPException(404, "No such uploaded document")
+        ev = await eng.add_document(filename, bytes(data), source_id=replace)
+        return [ev.to_dict()]
+
+    @app.get("/api/sources/{source_id}/file")
+    def download(source_id: int):
+        f = eng.store.file(source_id)
+        if not f:
+            raise HTTPException(404, "No file stored for this source")
+        return Response(f["data"], media_type=f["mime"], headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(f['filename'])}",
+            "X-Content-Type-Options": "nosniff",
+        })
 
     @app.post("/api/refresh")
     async def refresh(req: RefreshRequest):

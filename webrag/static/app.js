@@ -4,7 +4,7 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const NOT_FOUND = "I couldn't find that in the indexed pages.";
+const NOT_FOUND = "I couldn't find that in the indexed sources.";
 const GLOWS = ["var(--g-blue)", "var(--g-green)", "var(--g-orange)", "var(--g-pink)", "var(--g-purple)"];
 const chatHistory = [];
 let sources = [];
@@ -15,6 +15,16 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const host = (url) => { try { return new URL(url).host.replace(/^www\./, ""); } catch { return url; } };
 const where = (url) => { try { const u = new URL(url); return u.host.replace(/^www\./, "") + u.pathname; } catch { return url; } };
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const UPLOAD = "upload://";
+const isUpload = (url) => String(url || "").startsWith(UPLOAD);
+const fileName = (url) => String(url).slice(UPLOAD.length);
+// Short display name for any source URL (web host, or the uploaded file's name).
+const srcHost = (url) => (isUpload(url) ? fileName(url) : host(url));
+const fileHref = (id, section = "") => {
+  const m = /^Page (\d+)$/.exec(section || "");
+  return `/api/sources/${id}/file${m ? `#page=${m[1]}` : ""}`;
+};
+const fmtSize = (b) => (!b ? "" : b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1048576).toFixed(1)} MB`);
 
 function ago(ts, short = false) {
   if (!ts) return "never";
@@ -200,7 +210,7 @@ function renderStats() {
       <div class="stat-label"><i>◎</i>Sources indexed</div>
       <div class="stat-num">${sources.length}</div>
       <div class="stat-desc">${ok.length} healthy${sources.length - ok.length ? `, ${sources.length - ok.length} unreachable` : ""}</div>
-      <div class="stat-foot"><div class="squares">${squares}</div><div class="squares-note">one square per page</div></div>
+      <div class="stat-foot"><div class="squares">${squares}</div><div class="squares-note">one square per source</div></div>
     </div>
     <div class="stat">
       <div class="stat-label"><i>¶</i>Passages searchable</div>
@@ -249,27 +259,34 @@ $("#suggest").addEventListener("click", (ev) => {
 });
 
 // ------------------------------------------------------------------ sources view
+const DOC = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>`;
 const GLOBE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>`;
 
 function renderSources(flash = []) {
   if (!sources.length) {
-    $("#sources").innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sources yet</h3>Paste a URL above. Wikipedia articles, docs and blog posts all work well.</div>`;
+    $("#sources").innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sources yet</h3>Paste a URL or upload a document above. Wikipedia articles, docs, reports, slide decks and PDFs all work well.</div>`;
     return;
   }
   $("#sources").innerHTML = sources.map((s, i) => {
     const changed = s.n_versions > 1;
+    const file = s.kind === "file";
+    const link = file
+      ? `<a class="url" href="${fileHref(s.id)}" target="_blank" rel="noopener" title="Open ${esc(fileName(s.url))}">uploaded document${s.file_size ? ` · ${fmtSize(s.file_size)}` : ""}</a>`
+      : `<a class="url" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.url)}">${esc(where(s.url))}</a>`;
     return `<article class="card ${flash.includes(s.id) ? "flash" : ""}" style="--glow:${s.status === "error" ? "var(--magenta)" : GLOWS[i % GLOWS.length]}">
-      <div class="badge">${GLOBE}</div>
-      <h3>${esc(s.title || host(s.url))}</h3>
-      <a class="url" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.url)}">${esc(where(s.url))}</a>
+      <div class="badge">${file ? DOC : GLOBE}</div>
+      <h3>${esc(s.title || srcHost(s.url))}</h3>
+      ${link}
       <div class="meta">
         <span class="chip">${plural(s.n_chunks, "passage")}</span>
         <span class="chip ${changed ? "blue" : ""}">${plural(s.n_versions, "version")}</span>
-        <span class="chip">checked ${ago(s.checked_at, true)}</span>
+        <span class="chip">${file ? "updated" : "checked"} ${ago(file ? s.changed_at || s.checked_at : s.checked_at, true)}</span>
       </div>
       ${s.error ? `<div class="err">${esc(s.error)}</div>` : ""}
       <div class="actions">
-        <button class="btn btn-outline btn-sm" data-act="recheck" data-id="${s.id}">Recheck</button>
+        ${file
+          ? `<button class="btn btn-outline btn-sm" data-act="replace" data-id="${s.id}" title="Upload an updated copy; WebRAG records what changed">New version</button>`
+          : `<button class="btn btn-outline btn-sm" data-act="recheck" data-id="${s.id}">Recheck</button>`}
         <button class="btn btn-outline btn-sm" data-act="history" data-id="${s.id}">History</button>
         <button class="btn btn-ghost btn-sm" data-act="remove" data-id="${s.id}">Remove</button>
       </div>
@@ -292,7 +309,7 @@ async function afterRefresh(events, title) {
   const changed = events.some((e) => e.status === "changed");
   const failed = events.filter((e) => e.status === "error");
   toast(`${title}: ${summarise(events)}`, changed ? { href: "#changes", label: "View changes" } : null, failed.length > 0 && !changed);
-  failed.forEach((e) => toast(`${host(e.url)}: ${e.error}`, null, true));
+  failed.forEach((e) => toast(`${srcHost(e.url)}: ${e.error}`, null, true));
 }
 
 $("#sources").addEventListener("click", async (ev) => {
@@ -300,6 +317,7 @@ $("#sources").addEventListener("click", async (ev) => {
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === "history") return showHistory(id);
+  if (btn.dataset.act === "replace") return pickReplacement(id, btn);
   if (btn.dataset.act === "remove") {
     if (!confirm("Remove this source and its history?")) return;
     await api(`/api/sources/${id}`, { method: "DELETE" });
@@ -324,6 +342,72 @@ $("#add-form").addEventListener("submit", async (ev) => {
   });
 });
 
+// ------------------------------------------------------------------ document uploads
+const UPLOAD_EXT = [".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md"];
+const extOf = (name) => (name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
+
+async function uploadOne(file, replaceId = null) {
+  const qs = new URLSearchParams({ filename: file.name });
+  if (replaceId != null) qs.set("replace", replaceId);
+  const res = await fetch(`/api/documents?${qs}`, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    return [{ url: UPLOAD + file.name, status: "error", error: msg, source_id: null }];
+  }
+  return res.json();
+}
+
+async function uploadFiles(fileList, replaceId = null) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const bad = files.filter((f) => !UPLOAD_EXT.includes(extOf(f.name)));
+  bad.forEach((f) => toast(`${f.name}: unsupported file type`, null, true));
+  const good = files.filter((f) => !bad.includes(f));
+  if (!good.length) return;
+  const dz = $("#dropzone"), main = $("#dz-main"), old = main.innerHTML;
+  dz.classList.add("busy");
+  const events = [];
+  try {
+    for (const [i, f] of good.entries()) {
+      main.textContent = `Indexing ${f.name}${good.length > 1 ? ` (${i + 1}/${good.length})` : ""}…`;
+      events.push(...(await uploadOne(f, replaceId)));
+    }
+  } finally {
+    dz.classList.remove("busy");
+    main.innerHTML = old;
+    $("#files").value = "";
+  }
+  await afterRefresh(events, replaceId != null ? "New version" : "Upload done");
+  await loadStatus();
+}
+
+function pickReplacement(id, btn) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = UPLOAD_EXT.join(",");
+  input.addEventListener("change", () => {
+    if (input.files.length) busy(btn, "Indexing…", () => uploadFiles(input.files, id));
+  });
+  input.click();
+}
+
+$("#files").addEventListener("change", (ev) => uploadFiles(ev.target.files));
+$("#dropzone").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); $("#files").click(); }
+});
+["dragenter", "dragover"].forEach((t) => $("#dropzone").addEventListener(t, (ev) => {
+  ev.preventDefault(); ev.currentTarget.classList.add("over");
+}));
+["dragleave", "drop"].forEach((t) => $("#dropzone").addEventListener(t, (ev) => {
+  ev.preventDefault(); ev.currentTarget.classList.remove("over");
+}));
+$("#dropzone").addEventListener("drop", (ev) => uploadFiles(ev.dataTransfer.files));
+// Dropping a file anywhere else on the page should not navigate away from the app.
+["dragover", "drop"].forEach((t) => window.addEventListener(t, (ev) => ev.preventDefault()));
+
 $("#recheck-all").addEventListener("click", (ev) =>
   busy(ev.currentTarget, "Rechecking…", async () => {
     const events = await api("/api/refresh", { method: "POST", body: "{}" });
@@ -337,7 +421,7 @@ function changeCard(v, src, compact = false) {
   const side = `<div class="change-side">
       <div class="when">${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}</div>
       <div class="time">${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${ago(v.fetched_at, true)}</div>
-      ${compact ? "" : `<div class="src">${esc(src.title || host(src.url))}</div><div class="src-url">${esc(host(src.url))}</div>`}
+      ${compact ? "" : `<div class="src">${esc(src.title || srcHost(src.url))}</div><div class="src-url">${esc(src.kind === "file" ? "uploaded document" : host(src.url))}</div>`}
     </div>`;
   if (v.initial) {
     return `<div class="change added">${side}<div class="change-main">First indexed. This is the baseline future versions are compared against.</div></div>`;
@@ -352,7 +436,7 @@ function changeCard(v, src, compact = false) {
 async function loadChanges() {
   const box = $("#changes");
   if (!sources.length) {
-    box.innerHTML = `<div class="empty"><h3>No sources yet</h3>Add a page, edit it, then press “Recheck sources”. The edit will show up here.</div>`;
+    box.innerHTML = `<div class="empty"><h3>No sources yet</h3>Add a page, edit it, then press “Recheck sources”, or upload a new version of a document. The edit will show up here.</div>`;
     return;
   }
   const histories = await Promise.all(sources.map((s) => api(`/api/sources/${s.id}/history`).catch(() => null)));
@@ -366,9 +450,10 @@ async function loadChanges() {
 
 async function showHistory(id) {
   const data = await api(`/api/sources/${id}/history`);
-  $("#history-title").textContent = data.source.title || host(data.source.url);
-  $("#history-url").textContent = data.source.url;
-  $("#history-url").href = data.source.url;
+  const file = data.source.kind === "file";
+  $("#history-title").textContent = data.source.title || srcHost(data.source.url);
+  $("#history-url").textContent = file ? "open the latest uploaded file ↗" : data.source.url;
+  $("#history-url").href = file ? fileHref(data.source.id) : data.source.url;
   $("#history-body").innerHTML = data.versions.map((v) => changeCard(v, data.source, true)).join("");
   $("#history").showModal();
 }
@@ -384,7 +469,9 @@ function renderRefs(card, refs, answer) {
   const row = (r) => `<div class="ref" data-n="${r.n}">
       <span class="num">${r.n}</span>
       <div><div class="ref-title">${esc(r.title)}</div>${r.section ? `<div class="ref-sec">${esc(r.section.split(" > ").slice(-2).join(" › "))}</div>` : ""}</div>
-      <span class="ref-meta">checked ${ago(r.checked_at, true)} · <a href="${esc(r.url)}" target="_blank" rel="noopener">open ↗</a></span>
+      <span class="ref-meta">${r.kind === "file"
+        ? `updated ${ago(r.changed_at, true)} · <a href="${fileHref(r.source_id, r.section)}" target="_blank" rel="noopener">open file ↗</a>`
+        : `checked ${ago(r.checked_at, true)} · <a href="${esc(r.url)}" target="_blank" rel="noopener">open ↗</a>`}</span>
       <blockquote>${esc(r.text)}</blockquote>
     </div>`;
   const used = cited.size ? refs.filter((r) => cited.has(r.n)) : refs;
@@ -452,7 +539,7 @@ async function ask(question) {
   const nCited = new Set([...text.matchAll(/\[(\d+)\]/g)].map((m) => m[1])).size;
   const refused = !nCited && text.includes(NOT_FOUND);
   if (refused) {
-    body.innerHTML = `<div class="notfound"><b>Not in your sources.</b><span>None of the indexed pages answer this, so WebRAG won't guess. Try adding a page that covers it.</span></div><p></p>`;
+    body.innerHTML = `<div class="notfound"><b>Not in your sources.</b><span>None of your indexed pages or documents answer this, so WebRAG won't guess. Try adding a source that covers it.</span></div><p></p>`;
     chip.className = "chip pink"; chip.textContent = "not in sources";
   } else if (nCited) {
     chip.className = "chip green"; chip.textContent = `grounded in ${plural(nCited, "source")}`;

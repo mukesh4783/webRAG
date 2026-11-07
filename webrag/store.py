@@ -24,7 +24,16 @@ CREATE TABLE IF NOT EXISTS sources (
     checked_at    REAL,
     changed_at    REAL,
     status        TEXT DEFAULT 'ok',      -- ok | error
-    error         TEXT
+    error         TEXT,
+    kind          TEXT DEFAULT 'web'      -- web | file
+);
+
+CREATE TABLE IF NOT EXISTS files (        -- original bytes of uploaded documents (kind='file')
+    source_id  INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    filename   TEXT NOT NULL,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS versions (
@@ -70,6 +79,7 @@ class Hit:
     checked_at: float | None
     changed_at: float | None
     score: float = 0.0
+    kind: str = "web"
 
 
 class Store:
@@ -80,9 +90,17 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
+        self._migrate()
         self.db.executescript(SCHEMA)
         self._matrix_cache: tuple[int, np.ndarray, list[int]] | None = None
         self._generation = 0
+
+    def _migrate(self) -> None:
+        """Bring databases created by older versions up to the current schema."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
+        if cols and "kind" not in cols:
+            with self.db:
+                self.db.execute("ALTER TABLE sources ADD COLUMN kind TEXT DEFAULT 'web'")
 
     # ---------- meta ----------
     def get_meta(self, key: str) -> str | None:
@@ -103,16 +121,18 @@ class Store:
     def sources(self) -> list[sqlite3.Row]:
         return self.db.execute(
             """SELECT s.*, (SELECT COUNT(*) FROM chunks c WHERE c.source_id=s.id) AS n_chunks,
-                      (SELECT COUNT(*) FROM versions v WHERE v.source_id=s.id) AS n_versions
+                      (SELECT COUNT(*) FROM versions v WHERE v.source_id=s.id) AS n_versions,
+                      (SELECT size FROM files f WHERE f.source_id=s.id) AS file_size
                FROM sources s ORDER BY s.added_at"""
         ).fetchall()
 
-    def upsert_source(self, url: str) -> int:
+    def upsert_source(self, url: str, kind: str = "web") -> int:
         with self._lock, self.db:
             row = self.source_by_url(url)
             if row:
                 return row["id"]
-            cur = self.db.execute("INSERT INTO sources(url, added_at) VALUES (?, ?)", (url, time.time()))
+            cur = self.db.execute("INSERT INTO sources(url, added_at, kind) VALUES (?, ?, ?)",
+                                  (url, time.time(), kind))
             return cur.lastrowid
 
     def update_source(self, source_id: int, **fields) -> None:
@@ -127,6 +147,17 @@ class Store:
             self.db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
         self._invalidate()
+
+    # ---------- uploaded files ----------
+    def save_file(self, source_id: int, filename: str, mime: str, data: bytes) -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO files(source_id, filename, mime, size, data) VALUES (?, ?, ?, ?, ?)",
+                (source_id, filename, mime, len(data), data),
+            )
+
+    def file(self, source_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM files WHERE source_id=?", (source_id,)).fetchone()
 
     # ---------- versions ----------
     def add_version(self, source_id: int, content_hash: str, text: str) -> int:
@@ -240,13 +271,13 @@ class Store:
             return {}
         marks = ",".join("?" * len(chunk_ids))
         rows = self.db.execute(
-            f"""SELECT c.id, c.source_id, c.section, c.text, s.url, s.title, s.checked_at, s.changed_at
+            f"""SELECT c.id, c.source_id, c.section, c.text, s.url, s.title, s.checked_at, s.changed_at, s.kind
                 FROM chunks c JOIN sources s ON s.id=c.source_id WHERE c.id IN ({marks})""",
             chunk_ids,
         ).fetchall()
         return {
             r["id"]: Hit(r["id"], r["source_id"], r["url"], r["title"] or r["url"], r["section"] or "",
-                         r["text"], r["checked_at"], r["changed_at"])
+                         r["text"], r["checked_at"], r["changed_at"], kind=r["kind"] or "web")
             for r in rows
         }
 
