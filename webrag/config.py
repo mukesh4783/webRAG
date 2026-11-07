@@ -59,6 +59,9 @@ class Settings:
     max_pages: int = 25
     fetch_timeout: float = 20.0
 
+    # Uploaded documents (PDF, Word, PowerPoint, text)
+    max_upload_mb: float = 50.0
+
     # Background re-check interval for `serve` (0 = disabled)
     watch_minutes: float = 0.0
 
@@ -76,4 +79,5 @@ class Settings:
             chunk_chars=int(_env("WEBRAG_CHUNK_CHARS", "1200")),
             max_pages=int(_env("WEBRAG_MAX_PAGES", "25")),
             watch_minutes=float(_env("WEBRAG_WATCH_MINUTES", "0")),
+            max_upload_mb=float(_env("WEBRAG_MAX_UPLOAD_MB", "50")),
         )

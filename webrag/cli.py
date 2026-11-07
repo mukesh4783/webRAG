@@ -7,7 +7,9 @@ import asyncio
 import re
 import sys
 import time
+from pathlib import Path
 
+from .documents import is_supported
 from .engine import NOT_FOUND, Engine
 
 ICONS = {"new": "+ NEW      ", "changed": "~ CHANGED  ", "unchanged": "= UNCHANGED", "error": "! ERROR    "}
@@ -28,14 +30,14 @@ def _print_events(events) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="webrag", description="Grounded Q&A over live web pages.")
+    p = argparse.ArgumentParser(prog="webrag", description="Grounded Q&A over live web pages and documents.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("add", help="index one or more URLs")
-    a.add_argument("urls", nargs="+")
+    a = sub.add_parser("add", help="index URLs and/or local documents (PDF, DOCX, DOC, PPTX, PPT, TXT, MD)")
+    a.add_argument("urls", nargs="+", metavar="URL_OR_FILE")
     a.add_argument("--depth", type=int, default=0, help="also crawl same-site links N levels deep")
 
-    r = sub.add_parser("refresh", help="re-check all indexed pages and show what changed")
+    r = sub.add_parser("refresh", help="re-check all indexed web pages and show what changed")
     r.add_argument("--no-summary", action="store_true", help="skip the LLM change summary")
 
     sub.add_parser("list", help="list indexed sources")
@@ -76,7 +78,19 @@ def main(argv: list[str] | None = None) -> int:
         return row["id"]
 
     if args.cmd == "add":
-        _print_events(asyncio.run(eng.add(args.urls, depth=args.depth)))
+        files = [Path(a) for a in args.urls if Path(a).is_file()]
+        urls = [a for a in args.urls if not Path(a).is_file()]
+        bad = [f.name for f in files if not is_supported(f.name)]
+        if bad:
+            sys.exit(f"Unsupported file type: {bad[0]}")
+
+        async def run():
+            events = [await eng.add_document(f.name, f.read_bytes()) for f in files]
+            if urls:
+                events += await eng.add(urls, depth=args.depth)
+            return events
+
+        _print_events(asyncio.run(run()))
     elif args.cmd == "refresh":
         _print_events(asyncio.run(eng.refresh(summarize=not args.no_summary)))
     elif args.cmd == "list":

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WebRAG: grounded answers from live web pages</title>
+  <title>WebRAG: grounded answers from web pages and documents</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -42,10 +42,10 @@
         <div class="halftone"></div>
       </div>
       <div class="hero-content">
-        <span class="eyebrow">Grounded RAG · Live web pages</span>
+        <span class="eyebrow">Grounded RAG · Web pages &amp; documents</span>
         <h1>Ask the web you trust. <br>Verify every answer.</h1>
-        <p class="lead">WebRAG answers only from the pages you index, cites every claim, and notices
-          the moment a page changes.</p>
+        <p class="lead">WebRAG answers only from the pages and documents you add, cites every claim, and notices
+          the moment one changes.</p>
       </div>
     </section>
 
@@ -81,10 +81,11 @@
     <div class="page">
       <div class="page-head">
         <span class="eyebrow">Sources</span>
-        <h2>The pages your answers come from</h2>
-        <p>Add any public page. WebRAG keeps the readable text, splits it by section, and re-reads it to catch edits.</p>
+        <h2>The pages and files your answers come from</h2>
+        <p>Add any public page or upload a document. WebRAG keeps the readable text, splits it by section, and tracks every new version.</p>
       </div>
 
+      <div class="add-grid">
       <form id="add-form" class="panel add">
         <label for="urls" class="label">Page URLs</label>
         <textarea id="urls" rows="2" spellcheck="false" placeholder="https://en.wikipedia.org/wiki/Retrieval-augmented_generation&#10;one URL per line"></textarea>
@@ -97,6 +98,17 @@
           <button type="submit" class="btn btn-primary">Add sources</button>
         </div>
       </form>
+
+      <div class="panel add upload">
+        <span class="label">Documents</span>
+        <label class="dropzone" id="dropzone" tabindex="0">
+          <input type="file" id="files" multiple accept=".pdf,.docx,.doc,.pptx,.ppt,.txt,.md">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+          <span class="dz-main" id="dz-main">Drop files here or <u>browse</u></span>
+          <span class="dz-sub">PDF · Word (.docx, .doc) · PowerPoint (.pptx, .ppt) · .txt · .md</span>
+        </label>
+      </div>
+      </div>
 
       <div class="grid-head">
         <span class="label" id="sources-count">0 sources</span>

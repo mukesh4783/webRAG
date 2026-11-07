@@ -8,23 +8,25 @@ import hashlib
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Iterator
 
 from .chunk import chunk_page
 from .config import Settings
-from .extract import extract
+from .documents import DocumentError, mime_type, parse_document, source_url
+from .extract import Page, extract
 from .fetch import Fetcher, FetchResult, same_site_links
 from .providers import LLM, Embedder, make_embedder, make_llm
 from .store import Hit, Store
 
-NOT_FOUND = "I couldn't find that in the indexed pages."
+NOT_FOUND = "I couldn't find that in the indexed sources."
 
 ANSWER_SYSTEM = f"""You are WebRAG, a research assistant that answers questions strictly from \
-numbered excerpts of web pages that the user has chosen to index.
+numbered excerpts of web pages and documents that the user has chosen to index.
 
 Rules:
 - Use ONLY the information in the <sources> block of the latest message. Never rely on outside knowledge, \
-even if you are confident it is correct — the pages may intentionally differ from what you know.
+even if you are confident it is correct — the sources may intentionally differ from what you know.
 - Cite the excerpt(s) supporting each claim with bracketed numbers like [1] or [2][3], placed right after the claim.
 - If the excerpts do not contain the answer, reply with exactly: "{NOT_FOUND}" and nothing else.
 - If excerpts disagree with each other, point out the disagreement and cite both.
@@ -33,8 +35,8 @@ even if you are confident it is correct — the pages may intentionally differ f
 REWRITE_SYSTEM = """Rewrite the user's latest question into a single standalone search query, \
 resolving pronouns and references using the conversation. Output only the query text."""
 
-SUMMARY_SYSTEM = """You describe changes between two versions of a web page for a change log. \
-Given a unified diff of the page text, write one or two plain sentences stating concretely what changed \
+SUMMARY_SYSTEM = """You describe changes between two versions of a web page or document for a change log. \
+Given a unified diff of the text, write one or two plain sentences stating concretely what changed \
 (e.g. "The admission fee rose from Rs. 50,000 to Rs. 75,000."). Ignore trivial whitespace or formatting \
 changes. Output only the sentences."""
 
@@ -133,9 +135,37 @@ class Engine:
             await asyncio.to_thread(self._embed_pending)
         return events
 
+    async def add_document(self, filename: str, data: bytes, source_id: int | None = None,
+                           summarize: bool = True) -> ChangeEvent:
+        """Index an uploaded document. Uploading a file with the same name again (or passing the
+        `source_id` it replaces) records a new version, with a diff and change summary."""
+        filename = Path(filename.replace("\\", "/")).name.strip() or "document"
+        row = self.store.source(source_id) if source_id is not None else None
+        if source_id is not None and (row is None or row["kind"] != "file"):
+            return ChangeEvent(source_url(filename), "error", error="That source is not an uploaded document.")
+        url = row["url"] if row else source_url(filename)
+        if len(data) > self.s.max_upload_mb * 1024 * 1024:
+            return ChangeEvent(url, "error", source_id, filename,
+                               error=f"File is larger than the {self.s.max_upload_mb:g} MB limit.")
+        try:
+            page = await asyncio.to_thread(parse_document, filename, data)
+        except DocumentError as e:
+            return ChangeEvent(url, "error", source_id, filename, error=str(e))
+
+        async with self._ingest_lock:
+            sid = self.store.upsert_source(url, kind="file")
+            fields = dict(title=filename, status="ok", error=None, checked_at=time.time())
+            ev = await self._ingest_page(sid, page, fields, summarize)
+            # Keep the original bytes so citations can open the file (and jump to the cited PDF page).
+            self.store.save_file(sid, filename, mime_type(filename), data)
+            await asyncio.to_thread(self._embed_pending)
+        return ev
+
     async def refresh(self, source_ids: list[int] | None = None, summarize: bool = True) -> list[ChangeEvent]:
-        """Re-check indexed sources; only changed pages are re-chunked / re-embedded."""
-        rows = [r for r in self.store.sources() if source_ids is None or r["id"] in source_ids]
+        """Re-check indexed web pages; only changed pages are re-chunked / re-embedded.
+        Uploaded documents have nothing to re-fetch: they change when a new version is uploaded."""
+        rows = [r for r in self.store.sources()
+                if (r["kind"] or "web") == "web" and (source_ids is None or r["id"] in source_ids)]
         async with self._ingest_lock, self._fetcher() as f:
             results = await asyncio.gather(*(self._fetch_known(f, r["url"]) for r in rows))
             events = [(await self._process(res, summarize))[0] for res in results]
@@ -169,13 +199,19 @@ class Engine:
             err = "No readable text found on the page (it may require JavaScript to render)."
             self.store.update_source(sid, status="error", error=err, checked_at=now)
             return ChangeEvent(url, "error", sid, page.title, error=err), page.links
-        h = hashlib.sha256(text.encode()).hexdigest()
         fields = dict(title=page.title, etag=res.etag, last_modified=res.last_modified,
                       status="ok", error=None, checked_at=now)
+        return await self._ingest_page(sid, page, fields, summarize), page.links
+
+    async def _ingest_page(self, sid: int, page: Page, fields: dict, summarize: bool) -> ChangeEvent:
+        """Store freshly extracted content (web page or document): version, diff, summary, chunk sync."""
+        row = self.store.source(sid)
+        url, text, now = row["url"], page.text, time.time()
+        h = hashlib.sha256(text.encode()).hexdigest()
 
         if row["content_hash"] == h:
             self.store.update_source(sid, **fields)
-            return ChangeEvent(url, "unchanged", sid, page.title), page.links
+            return ChangeEvent(url, "unchanged", sid, page.title)
 
         prev = self.store.latest_version(sid)
         vid = self.store.add_version(sid, h, text)
@@ -186,7 +222,7 @@ class Engine:
         self.store.update_source(sid, content_hash=h, changed_at=now, **fields)
 
         if prev is None:
-            return ChangeEvent(url, "new", sid, page.title, chunks_added=len(inserted)), page.links
+            return ChangeEvent(url, "new", sid, page.title, chunks_added=len(inserted))
 
         diff, n_add, n_del = text_diff(prev["text"], text)
         ev = ChangeEvent(url, "changed", sid, page.title, diff=diff, added=n_add, removed=n_del,
@@ -200,7 +236,7 @@ class Engine:
             except Exception as e:  # a summary is a nice-to-have; never fail the refresh for it
                 ev.summary = ""
                 print(f"[webrag] change summary failed: {e}")
-        return ev, page.links
+        return ev
 
     def _embed_pending(self) -> None:
         if not self.embedder:
@@ -287,8 +323,10 @@ class Engine:
             return
 
         context = "\n\n".join(
-            f"[{i + 1}] {h.title}{' — ' + h.section if h.section else ''}\nURL: {h.url}\n"
-            f"Last checked: {_fmt_time(h.checked_at)}\n{h.text}"
+            f"[{i + 1}] {h.title}{' — ' + h.section if h.section else ''}\n"
+            + (f"Uploaded document, last updated: {_fmt_time(h.changed_at)}\n" if h.kind == "file"
+               else f"URL: {h.url}\nLast checked: {_fmt_time(h.checked_at)}\n")
+            + h.text
             for i, h in enumerate(hits)
         )
         messages = [*history, {"role": "user", "content": f"<sources>\n{context}\n</sources>\n\nQuestion: {question}"}]
@@ -313,7 +351,8 @@ class Engine:
     @staticmethod
     def _hit_dict(n: int, h: Hit) -> dict:
         return {"n": n, "url": h.url, "title": h.title, "section": h.section, "text": h.text,
-                "checked_at": h.checked_at, "changed_at": h.changed_at, "score": round(h.score, 4)}
+                "checked_at": h.checked_at, "changed_at": h.changed_at, "score": round(h.score, 4),
+                "kind": h.kind, "source_id": h.source_id}
 
 
 def _fmt_time(ts: float | None) -> str:

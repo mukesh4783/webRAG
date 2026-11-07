@@ -1,6 +1,6 @@
-# ◎ WebRAG 2 — grounded, change-aware Q&A over live web pages
+# ◎ WebRAG 2 — grounded, change-aware Q&A over live web pages and documents
 
-Point WebRAG at some web pages and ask questions. Answers come **only** from those pages, every claim is
+Point WebRAG at some web pages, or upload PDFs, Word files and slide decks, and ask questions. Answers come **only** from those pages, every claim is
 **cited**, and WebRAG keeps watching the pages: when one changes you get a **word-level diff**, a
 **plain-English summary of what changed**, and answers that reflect the new content immediately.
 
@@ -25,6 +25,7 @@ The admission fee for the 2026 academic year is Rs. 75,000 [1].
 | Change tracking | Last diff only | **Full version history** per page, with diffs between versions and LLM change summaries |
 | Freshness | Manual button | Manual, per-page, `webrag watch`, or automatic background re-checks in the server |
 | Coverage | Single URLs | Optional **same-site crawl** (depth 1–2, respects `robots.txt`) |
+| Documents | — | **Upload PDF, Word (`.docx`/`.doc`), PowerPoint (`.pptx`/`.ppt`), `.txt` and `.md`**, with page / slide / heading-level citations and version history on re-upload |
 | Models | Ollama via LangChain | Same Ollama models (`gemma4:31b-cloud`, `nomic-embed-text`) called directly over Ollama's HTTP API, with no LangChain; still works with no model (retrieval-only) |
 | UI | Streamlit | FastAPI + a no-build single-page app, plus a full **CLI** |
 | Tests | — | Offline test suite (mocked HTTP, fake models) |
@@ -38,6 +39,8 @@ The admission fee for the 2026 academic year is Rs. 75,000 [1].
              └───────────────────┬────────────────────────┘
                                  ▼
                     webrag/extract.py  readable blocks + heading paths
+                                 ▼                 ◀── webrag/documents.py  uploaded PDF / DOCX / PPTX / TXT
+                                 ▼                     → the same blocks: "Page 3", "Slide 4: Pricing", "Policies > Refunds"
                                  ▼
              sha256(text) same as last version? → "unchanged"
                                  ▼  (changed or new)
@@ -53,7 +56,8 @@ The admission fee for the 2026 academic year is Rs. 75,000 [1].
 
 | Module | Role |
 |---|---|
-| `webrag/engine.py` | Orchestration: add / refresh / history / search / ask |
+| `webrag/engine.py` | Orchestration: add / add_document / refresh / history / search / ask |
+| `webrag/documents.py` | Parses uploaded PDF, Word, PowerPoint and text files into section-aware blocks |
 | `webrag/providers.py` | `OllamaLLM` (streaming chat) and `OllamaEmbedder` |
 | `webrag/server.py` | FastAPI JSON API + Server-Sent-Events answer stream |
 | `webrag/static/` | Web UI (vanilla HTML/CSS/JS) |
@@ -88,14 +92,30 @@ Add URLs on the left, ask questions, and click a `[n]` citation to jump to its s
 changes** re-checks every page and opens the freshness report with diffs. The 🕘 button on a source shows its
 version timeline. Set `WEBRAG_WATCH_MINUTES=10` to re-check automatically.
 
+On the **Sources** tab, drop files onto the **Documents** box (or click to browse) to upload them. Citations to a
+document open the original file, and for PDFs jump straight to the cited page. To update a document, click
+**New version** on its card, or upload a file with the same name again: WebRAG records a new version with a
+diff and a change summary, exactly like an edited web page.
+
+| Format | How it is split into sections |
+|---|---|
+| PDF | One section per page (`Page 3`). Scanned PDFs without a text layer are rejected (no OCR). |
+| Word `.docx` | The document's own heading hierarchy (`Title > Heading 1 > Heading 2`); tables are kept row by row |
+| PowerPoint `.pptx` | One section per slide (`Slide 4: Pricing`), including tables and speaker notes |
+| `.txt`, `.md` | Markdown `#` headings, if present |
+| Legacy `.doc`, `.ppt` | Converted with [LibreOffice](https://www.libreoffice.org) (`soffice`) if it is installed; otherwise re-save as `.docx` / `.pptx` |
+
+Uploads are limited to 50 MB each (`WEBRAG_MAX_UPLOAD_MB`). The original file is stored in `webrag.db`.
+
 ### CLI
 ```bash
 python -m webrag add https://en.wikipedia.org/wiki/Python_(programming_language)
 python -m webrag add https://docs.example.com/guide/ --depth 1     # also crawl same-site links
+python -m webrag add report.pdf slides.pptx handbook.docx         # local documents (mix with URLs freely)
 python -m webrag ask "When was Python 3.13 released?"
 python -m webrag ask                                              # interactive chat with follow-ups
 python -m webrag list
-python -m webrag refresh                                          # what changed?
+python -m webrag refresh                                          # what changed on the web pages?
 python -m webrag history 1                                        # version timeline + diffs
 python -m webrag watch --every 15
 python -m webrag remove 1
@@ -111,7 +131,7 @@ python -m webrag refresh                                 # → UNCHANGED (304 No
 # edit examples/mock_university.html: Rs. 50,000 → Rs. 75,000, save
 python -m webrag refresh                                 # → CHANGED, diff + summary, 1 chunk re-indexed
 python -m webrag ask "What is the admission fee?"        # → Rs. 75,000 [1]
-python -m webrag ask "Who is Hugh Jackman?"              # → "I couldn't find that in the indexed pages."
+python -m webrag ask "Who is Hugh Jackman?"              # → "I couldn't find that in the indexed sources."
 ```
 
 ## Tests
@@ -120,7 +140,8 @@ python -m webrag ask "Who is Hugh Jackman?"              # → "I couldn't find 
 pytest
 ```
 The suite runs fully offline. It covers extraction, chunking, the full index → ask → change → re-ask cycle,
-304 handling, incremental re-embedding, crawling, follow-up rewriting, embedding outages, and the HTTP API.
+304 handling, incremental re-embedding, crawling, follow-up rewriting, embedding outages, the HTTP API, and
+document uploads (PDF, Word and PowerPoint files are generated in memory by the tests).
 
 ## Notes
 - Everything lives in `webrag.db`. Delete it to start fresh. Changing the embedding model re-embeds automatically.
